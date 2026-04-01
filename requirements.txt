@@ -1,0 +1,12 @@
+# Meshtastic radio interface
+meshtastic>=2.3.0
+
+# PubSub event system (used by meshtastic)
+pypubsub>=4.0.3
+
+# OpenVINO LLM inference
+openvino-genai>=2024.4.0
+
+# Optional: needed on Linux for Meshtastic TCP/serial detection
+pytap2>=2.1.0
+pyserial>=3.5
