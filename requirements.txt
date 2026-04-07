@@ -10,3 +10,6 @@ openvino-genai>=2024.4.0
 # Optional: needed on Linux for Meshtastic TCP/serial detection
 pytap2>=2.1.0
 pyserial>=3.5
+
+# Environment variable loading
+python-dotenv>=1.0.0

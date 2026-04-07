@@ -1,0 +1,21 @@
+# Environment secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# OpenVINO model directories (large binary files)
+*.bin
+*.xml
+*.mapping
+
+# OS
+.DS_Store
+Thumbs.db
