@@ -8,6 +8,27 @@ Gateway que recebe mensagens de texto via rádio LoRa (Meshtastic), consulta um 
 
 ---
 
+## Estrutura do projeto
+
+```
+chat_mesh/
+├── main.py                    # Ponto de entrada principal
+├── chat_mesh/
+│   ├── config.py              # Constantes e tunables
+│   ├── llm/
+│   │   ├── pipeline.py        # Carregamento do modelo OpenVINO
+│   │   └── prompt.py          # Construção de prompt, compressão de histórico, streaming
+│   └── mesh/
+│       ├── gateway.py         # MeshLLMGateway — sessões, ACK, envio
+│       └── radio.py           # Chunking de pacotes, descoberta de modelos, menus
+├── .env                       # Configuração local (não commitado)
+├── .env_dev                   # Template — copie para .env e preencha
+├── requirements.txt
+└── changes.md                 # Histórico de mudanças e documentação técnica
+```
+
+---
+
 ## Requisitos
 
 ### Hardware
@@ -25,9 +46,30 @@ pip install -r requirements.txt
 
 ---
 
+## Configuração
+
+Todas as opções podem ser passadas via argumentos CLI ou variáveis de ambiente. Copie `.env_dev` para `.env` e preencha:
+
+```bash
+cp .env_dev .env
+```
+
+| Variável de ambiente | Argumento CLI    | Padrão          | Descrição                                              |
+|----------------------|------------------|-----------------|--------------------------------------------------------|
+| `MESH_PORT`          | `--port`         | auto-detect     | Porta serial do dispositivo Meshtastic                 |
+| `MESH_HOST`          | `--host`         | —               | IP do dispositivo Meshtastic via TCP (WiFi)            |
+| `MESH_MODEL`         | `--model`        | menu interativo | Caminho para o diretório do modelo OpenVINO            |
+| `MESH_DEVICE`        | `--device`       | menu interativo | Dispositivo de inferência: `CPU`, `GPU`, `NPU`, `AUTO` |
+| `MESH_REPLY_MODE`    | `--reply-mode`   | `dm`            | Modo de resposta (ver abaixo)                          |
+| `MESH_CHANNEL_PSK`   | `--channel-psk`  | `AQ==`          | PSK do canal 0 em Base64 (informativo)                 |
+
+> `--port` e `--host` são mutuamente exclusivos.
+
+---
+
 ## Preparar o modelo
 
-O gateway usa modelos no formato OpenVINO IR (`.xml` + `.bin`). Você pode converter modelos do Hugging Face usando o `optimum-intel`:
+O gateway usa modelos no formato OpenVINO IR (`.xml` + `.bin`). Converta modelos do Hugging Face com o `optimum-intel`:
 
 ```bash
 pip install optimum[openvino]
@@ -52,56 +94,89 @@ optimum-cli export openvino \
 ### Modo interativo (menus)
 
 ```bash
-python mesh_llm_gateway.py
+python main.py
 ```
 
-Seleciona modelo e dispositivo de compute via menus numerados.
+Seleciona modelo e dispositivo via menus numerados.
 
 ### Modo por argumentos
 
 ```bash
-# Serial (mais comum — cabo USB)
-python mesh_llm_gateway.py --port /dev/ttyUSB0 --model ./qwen2.5-1.5b-int4 --device CPU
+# Serial (cabo USB)
+python main.py --port /dev/ttyUSB0 --model ./qwen2.5-1.5b-int4 --device CPU
 
 # Windows
-python mesh_llm_gateway.py --port COM3 --model ./qwen2.5-1.5b-int4 --device CPU
+python main.py --port COM3 --model ./qwen2.5-1.5b-int4 --device CPU
 
-# TCP (dispositivo Meshtastic com WiFi habilitado)
-python mesh_llm_gateway.py --host 192.168.1.10 --model ./qwen2.5-1.5b-int4 --device CPU
+# TCP (dispositivo com WiFi)
+python main.py --host 192.168.1.10 --model ./qwen2.5-1.5b-int4 --device CPU
 
 # NPU Intel (mais rápido em laptops com Core Ultra)
-python mesh_llm_gateway.py --port /dev/ttyUSB0 --model ./qwen2.5-1.5b-int4 --device NPU
+python main.py --port /dev/ttyUSB0 --model ./qwen2.5-1.5b-int4 --device NPU
 
-# AUTO (OpenVINO escolhe o melhor dispositivo disponível)
-python mesh_llm_gateway.py --port /dev/ttyUSB0 --model ./qwen2.5-1.5b-int4 --device AUTO
+# Respostas visíveis para todos no canal 0 (LongFast)
+python main.py --reply-mode broadcast
 ```
 
-### Todos os argumentos
+Para ver todos os argumentos com exemplos:
 
-| Argumento  | Descrição                                              | Padrão              |
-|------------|--------------------------------------------------------|---------------------|
-| `--port`   | Porta serial do dispositivo Meshtastic                 | auto-detect         |
-| `--host`   | IP do dispositivo Meshtastic via TCP (WiFi)            | —                   |
-| `--model`  | Caminho para o diretório do modelo OpenVINO            | menu interativo     |
-| `--device` | Dispositivo de inferência: `CPU`, `GPU`, `NPU`, `AUTO` | menu interativo     |
+```bash
+python main.py --help
+```
 
-> `--port` e `--host` são mutuamente exclusivos.
+---
+
+## Modos de resposta (`--reply-mode`)
+
+### `dm` (padrão)
+
+A resposta é enviada diretamente ao nó que enviou a mensagem, com confirmação de entrega (ACK). Se o pacote não for confirmado após 3 retransmissões do firmware, o gateway para de enviar e loga um aviso.
+
+- Apenas o remetente vê a resposta
+- ACK garantido: se a mensagem chegou, as chaves já batem
+- Ideal para uso privado
+
+### `broadcast`
+
+A resposta é enviada no canal 0 (LongFast) e fica visível para todos os nós com a mesma chave do canal. A resposta é prefixada com `@<node_id>:` para identificar quem perguntou.
+
+- Todos os nós no canal 0 veem a resposta
+- Todos os dispositivos devem compartilhar o mesmo PSK do canal 0
+- Ideal para uso em grupo / público
+
+---
+
+## Criptografia
+
+O Meshtastic criptografa todas as mensagens com AES-256 no nível do firmware. O gateway só vê texto plano — a criptografia é transparente.
+
+O `MESH_CHANNEL_PSK` no `.env` é **informativo**: documenta a chave configurada nos dispositivos físicos. Para aplicar uma chave via CLI:
+
+```bash
+# Chave pública padrão (sem privacidade real)
+meshtastic --ch-index 0 --ch-set psk default
+
+# Chave privada personalizada
+meshtastic --ch-index 0 --ch-set psk base64:SUA_CHAVE_BASE64
+
+# Gerar uma chave privada
+openssl rand -base64 32
+```
 
 ---
 
 ## Como usar pelo rádio
 
-Do lado do rádio remoto (ex: app Meshtastic no celular):
+1. **Abra o canal correto** no app Meshtastic (mesmo canal que o gateway está ouvindo)
+2. **Envie uma mensagem** diretamente para o nó do gateway (modo `dm`) ou no canal (modo `broadcast`)
+3. Aguarde a resposta — respostas longas chegam em partes `[1/2]`, `[2/2]`
 
-1. **Abra o canal** correto (o mesmo que o gateway está ouvindo)
-2. **Envie uma mensagem direta (DM)** para o nó do gateway
-3. Aguarde a resposta — pode vir em múltiplas partes `[1/2]`, `[2/2]` para respostas longas
+### Comandos especiais
 
-### Comando especial
-
-| Mensagem | Efeito                                      |
-|----------|---------------------------------------------|
-| `!reset` | Limpa o histórico de conversa do seu nó     |
+| Mensagem | Efeito                                  |
+|----------|-----------------------------------------|
+| `!reset` | Limpa o histórico de conversa do seu nó |
+| `/reset` | Mesmo efeito                            |
 
 ---
 
@@ -109,19 +184,21 @@ Do lado do rádio remoto (ex: app Meshtastic no celular):
 
 - **Histórico por nó:** cada rádio remoto tem sua própria sessão de conversa independente
 - **Compressão automática:** quando o histórico fica longo, o gateway resume automaticamente as mensagens antigas para caber no contexto do LLM
+- **Resposta completa primeiro:** o LLM gera a resposta inteira antes de qualquer pacote ser enviado — nunca envia respostas parciais
+- **ACK por chunk:** no modo `dm`, cada chunk aguarda confirmação de entrega antes de enviar o próximo
 - **Chunking:** respostas longas são divididas em pacotes de até 200 bytes para respeitar o limite do protocolo Meshtastic
-- **Fila de processamento:** múltiplas mensagens simultâneas são processadas sequencialmente (o rádio listener nunca bloqueia)
 
 ---
 
-## Recomendações de modelo por hardware
+## Modelos recomendados
 
-| Hardware              | Modelo recomendado           | Quantização | RAM aprox. |
-|-----------------------|------------------------------|-------------|------------|
-| CPU moderno (8+ cores) | Qwen2.5-3B-Instruct         | int4        | ~2 GB      |
-| CPU limitado           | Qwen2.5-1.5B-Instruct       | int4        | ~1 GB      |
-| Intel Arc / iGPU       | Phi-3.5-mini-instruct       | int4        | ~2 GB      |
-| NPU Intel Core Ultra   | Qwen2.5-1.5B-Instruct       | int4        | —          |
+| Modelo                    | RAM (int4) | CPU 8-core | NPU Core Ultra | Indicado para               |
+|---------------------------|-----------|------------|----------------|-----------------------------|
+| Qwen2.5-1.5B-Instruct     | ~900 MB   | 2–5 s      | 1–3 s          | Qualquer hardware, padrão   |
+| Qwen2.5-3B-Instruct       | ~1.8 GB   | 5–10 s     | 2–5 s          | CPU moderno, iGPU           |
+| Phi-3.5-mini-instruct     | ~2.2 GB   | 8–15 s     | não suportado  | Perguntas técnicas, Arc GPU |
+
+Use quantização `int4` para uso em rádio — menor e mais rápido com mínima perda de qualidade.
 
 ---
 
