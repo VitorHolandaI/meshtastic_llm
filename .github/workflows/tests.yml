@@ -17,8 +17,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install test dependencies
-        run: pip install pytest pytest-cov python-dotenv
+      - name: Install dependencies
+        run: pip install pytest pytest-cov python-dotenv pypubsub
 
       - name: Run tests with coverage
         run: pytest tests/ -v --cov=chat_mesh --cov-report=term-missing
