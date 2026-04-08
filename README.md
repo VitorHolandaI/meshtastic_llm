@@ -9,6 +9,10 @@ Gateway que recebe mensagens de texto via rádio LoRa (Meshtastic), consulta um 
 [Rádio remoto] ──LoRa──> [Dispositivo Meshtastic] ──USB/WiFi──> [Gateway + LLM] ──> [resposta pelo rádio]
 ```
 
+> **Status atual:**
+> - `--reply-mode broadcast` (canal público) — funcionando ✓
+> - `--reply-mode dm` (mensagem direta) — em investigação, ACK não está sendo confirmado ✗
+
 ---
 
 ## Estrutura do projeto
