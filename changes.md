@@ -201,6 +201,14 @@ Use `int4` quantization for radio use — smaller and faster with minimal qualit
 - Full `--help` output with usage examples, radio commands, encryption notes, and env var reference
 - All arguments have descriptive help text including their `[env: VAR]` fallback
 
+### Test suite (`tests/`)
+- `tests/unit/test_chunk_text.py` — 15 tests covering chunk splitting, byte limits, UTF-8, edge cases
+- `tests/unit/test_prompt.py` — covers `strip_think`, `build_prompt`, `collect_streamer`
+- `tests/unit/test_store.py` — covers `SessionStore` with in-memory SQLite (`:memory:`)
+- `tests/integration/test_gateway.py` — full gateway flow with mocked interface and pipe
+- GitHub Actions workflow runs `pytest tests/ -v` on every push to any branch
+- `pytest` added to `requirements.txt`
+
 ### SQLite session persistence (`chat_mesh/db/`)
 - Added `chat_mesh/db/store.py` with `SessionStore` class backed by SQLite
 - Sessions now persist across gateway restarts — no more lost history on reboot
