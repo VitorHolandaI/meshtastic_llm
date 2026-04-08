@@ -1,5 +1,8 @@
 # Meshtastic ↔ OpenVINO LLM Gateway
 
+[![tests](https://github.com/VitorHolandaI/meshtastic_llm/actions/workflows/tests.yml/badge.svg)](https://github.com/VitorHolandaI/meshtastic_llm/actions/workflows/tests.yml)
+![coverage](https://img.shields.io/badge/coverage-0%25-lightgrey)
+
 Gateway que recebe mensagens de texto via rádio LoRa (Meshtastic), consulta um LLM local (OpenVINO) e devolve a resposta pelo rádio. Funciona sem internet — ideal para situações sem energia ou conectividade.
 
 ```

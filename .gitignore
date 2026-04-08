@@ -8,6 +8,7 @@ db/*.db-shm
 
 # Coverage
 .coverage
+coverage.xml
 htmlcov/
 
 # Python

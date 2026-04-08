@@ -23,9 +23,11 @@ Before committing and pushing any significant change:
    ```
 3. **Update `changes.md`** — log what changed and why
 4. **Commit** — one logical change per commit, short message
-5. **Push** — push the branch, open a PR into `main`
-   - `git push origin <branch>` → GitHub (default, triggers CI)
-   - `git push gitea <branch>` → local Gitea backup
+5. **Push** — use `push.sh` instead of `git push` directly
+   ```bash
+   ./push.sh "feat: my feature description"
+   ```
+   The script runs tests, updates the coverage badge in README, commits if changed, then pushes to both GitHub and Gitea.
 
 CI runs automatically on every push via GitHub Actions (`.github/workflows/tests.yml`).
 A green CI run is required before merging into `main`.
