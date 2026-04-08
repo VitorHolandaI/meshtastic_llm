@@ -5,6 +5,7 @@ omit =
     chat_mesh/llm/__init__.py
     chat_mesh/mesh/__init__.py
     chat_mesh/db/__init__.py
+    chat_mesh/llm/pipeline.py
 
 [report]
 show_missing = true

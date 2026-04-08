@@ -145,3 +145,65 @@ def test_collect_streamer_empty_token():
     streamer  = collect_streamer(collector)
     streamer("")
     assert collector == [""]
+
+
+def test_collect_streamer_think_close_with_trailing_text():
+    # Covers the buf.append(after) branch — text after </think> in the same token
+    collector = []
+    streamer  = collect_streamer(collector)
+    streamer("<think>")
+    streamer("reasoning</think>visible text")
+    assert "visible text" in strip_think("".join(collector))
+
+
+# ── compress_history ──────────────────────────────────────────────────────────
+
+def test_compress_history_calls_pipe_generate():
+    from unittest.mock import MagicMock
+    from chat_mesh.llm.prompt import compress_history
+
+    pipe = MagicMock()
+    def fake_generate(prompt, max_new_tokens=None, streamer=None, **kwargs):
+        if streamer:
+            streamer("brief summary")
+    pipe.generate.side_effect = fake_generate
+
+    history = [("user", "a"), ("assistant", "b"), ("user", "c"),
+               ("assistant", "d"), ("user", "e"), ("assistant", "f")]
+    summary, kept = compress_history(pipe, history, "")
+
+    assert pipe.generate.called
+    assert isinstance(summary, str)
+    assert len(kept) <= 3   # COMPRESS_KEEP
+
+
+def test_compress_history_returns_kept_turns():
+    from unittest.mock import MagicMock
+    from chat_mesh.llm.prompt import compress_history
+
+    pipe = MagicMock()
+    pipe.generate.side_effect = lambda *a, **kw: None
+
+    history = [("user", "old1"), ("assistant", "old2"),
+               ("user", "keep1"), ("assistant", "keep2"), ("user", "keep3")]
+    _, kept = compress_history(pipe, history, "")
+    # COMPRESS_KEEP=3 → last 3 turns are kept verbatim
+    assert kept == [("user", "keep1"), ("assistant", "keep2"), ("user", "keep3")]
+
+
+def test_compress_history_with_existing_summary():
+    from unittest.mock import MagicMock
+    from chat_mesh.llm.prompt import compress_history
+
+    captured = {}
+    def fake_generate(prompt, max_new_tokens=None, streamer=None, **kwargs):
+        captured["prompt"] = prompt
+        if streamer:
+            streamer("new summary")
+    pipe = MagicMock()
+    pipe.generate.side_effect = fake_generate
+
+    history = [("user", "a"), ("assistant", "b"), ("user", "c"),
+               ("assistant", "d"), ("user", "e"), ("assistant", "f")]
+    compress_history(pipe, history, "prior summary")
+    assert "prior summary" in captured["prompt"]

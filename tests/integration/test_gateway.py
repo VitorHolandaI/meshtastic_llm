@@ -8,7 +8,7 @@ session handling, and DB persistence are exercised with real code.
 import time
 import threading
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 from chat_mesh.db.store     import SessionStore
 from chat_mesh.mesh.gateway import MeshLLMGateway
@@ -184,6 +184,158 @@ def test_broadcast_prefixes_sender_id():
 
 
 # ── ACK behaviour ─────────────────────────────────────────────────────────────
+
+# ── reply contains "Assistant:" artifact ─────────────────────────────────────
+
+def test_reply_strips_assistant_prefix(gateway):
+    """When model leaks 'Assistant: ...' in output, it should be stripped."""
+    iface = make_interface()
+    pipe  = make_pipe("Assistant: cleaned response")
+    store = SessionStore(db_path=":memory:")
+    gw    = MeshLLMGateway(iface, pipe, 3200, reply_mode="dm", store=store)
+    send_and_wait(gw, make_packet("hello"))
+    gw.stop()
+    sent_text = iface.sent[0]["text"]
+    assert "Assistant:" not in sent_text
+    assert "cleaned response" in sent_text
+
+
+# ── multi-chunk with sleep (covers time.sleep branches) ───────────────────────
+
+def test_multi_chunk_dm_sends_all_chunks(store):
+    iface = make_interface()
+    long_reply = "word " * 60   # ~300 bytes → needs 2+ chunks at 200 bytes each
+    pipe  = make_pipe(long_reply)
+    with patch("chat_mesh.mesh.gateway.CHUNK_DELAY", 0):  # skip actual sleep
+        gw = MeshLLMGateway(iface, pipe, 3200, reply_mode="dm", store=store)
+        send_and_wait(gw, make_packet("hello"))
+        gw.stop()
+    assert len(iface.sent) > 1
+
+
+def test_multi_chunk_broadcast_sends_all_chunks(store):
+    iface = make_interface()
+    long_reply = "word " * 60
+    pipe  = make_pipe(long_reply)
+    with patch("chat_mesh.mesh.gateway.CHUNK_DELAY", 0):
+        gw = MeshLLMGateway(iface, pipe, 3200, reply_mode="broadcast", store=store)
+        send_and_wait(gw, make_packet("hello"))
+        gw.stop()
+    assert len(iface.sent) > 1
+
+
+# ── broadcast reset ───────────────────────────────────────────────────────────
+
+def test_reset_broadcast_sends_to_channel_0(store):
+    iface = make_interface()
+    pipe  = make_pipe()
+    gw    = MeshLLMGateway(iface, pipe, 3200, reply_mode="broadcast", store=store)
+    gw._on_receive(make_packet("!reset", from_id="!abc", channel=0), iface)
+    time.sleep(0.1)  # reset is synchronous but give pubsub a moment
+    gw.stop()
+    assert any(s["ch"] == 0 for s in iface.sent)
+
+
+# ── _on_ack ───────────────────────────────────────────────────────────────────
+
+def test_on_ack_resolves_pending_ack(gateway):
+    event = threading.Event()
+    with gateway.lock:
+        gateway._pending_acks[42] = {"event": event, "ok": False}
+    packet = {"decoded": {"requestId": 42, "routing": {"errorReason": "NONE"}}}
+    gateway._on_ack(packet, None)
+    assert event.is_set()
+    assert gateway._pending_acks[42]["ok"] is True
+
+
+def test_on_ack_marks_nack(gateway):
+    event = threading.Event()
+    with gateway.lock:
+        gateway._pending_acks[99] = {"event": event, "ok": False}
+    packet = {"decoded": {"requestId": 99, "routing": {"errorReason": "NO_ROUTE"}}}
+    gateway._on_ack(packet, None)
+    assert gateway._pending_acks[99]["ok"] is False
+
+
+def test_on_ack_ignores_unknown_request_id(gateway):
+    packet = {"decoded": {"requestId": 0, "routing": {"errorReason": "NONE"}}}
+    gateway._on_ack(packet, None)   # should not raise
+
+
+def test_on_ack_ignores_packet_without_request_id(gateway):
+    packet = {"decoded": {"routing": {}}}
+    gateway._on_ack(packet, None)   # should not raise
+
+
+# ── compression path ──────────────────────────────────────────────────────────
+
+def test_compression_triggered_when_prompt_too_long(store):
+    iface = make_interface()
+    pipe  = make_pipe("compressed reply")
+    # token limit so small that any history triggers compression
+    gw    = MeshLLMGateway(iface, pipe, prompt_token_limit=1, reply_mode="dm", store=store)
+
+    # Pre-load some history
+    history = [("user", "hi"), ("assistant", "hello")]
+    with gw.lock:
+        gw._sessions[("!aaa111", 0)] = {"history": history, "summary": ""}
+    store.append_messages("!aaa111", 0, history)
+
+    send_and_wait(gw, make_packet("new message"))
+    gw.stop()
+
+    session = store.load_session("!aaa111", 0)
+    # After compression summary should be set or history trimmed
+    assert session["summary"] != "" or len(session["history"]) <= 4
+
+
+# ── token limit retry ─────────────────────────────────────────────────────────
+
+def test_token_limit_retry_on_generate_error(store):
+    iface      = make_interface()
+    call_count = {"n": 0}
+
+    def fake_generate(prompt, streamer=None, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("too many tokens in context")
+        if streamer:
+            for token in ["retry ", "ok"]:
+                streamer(token)
+
+    pipe = MagicMock()
+    pipe.generate.side_effect = fake_generate
+    gw   = MeshLLMGateway(iface, pipe, 3200, reply_mode="dm", store=store)
+
+    # Need existing history so retry path's `and history` check passes
+    history = [("user", "prev"), ("assistant", "prev reply")]
+    with gw.lock:
+        gw._sessions[("!aaa111", 0)] = {"history": history, "summary": ""}
+    store.append_messages("!aaa111", 0, history)
+
+    send_and_wait(gw, make_packet("hello"))
+    gw.stop()
+
+    assert call_count["n"] >= 2
+    assert iface.sendText.called
+
+
+# ── _process_loop error handling ──────────────────────────────────────────────
+
+def test_process_loop_catches_handle_errors(gateway):
+    """_process_loop must not crash when _handle raises an unexpected error."""
+    with patch.object(gateway, "_handle", side_effect=RuntimeError("unexpected")):
+        gateway._on_receive(make_packet("hello"), gateway.interface)
+        gateway.work_queue.join()   # must not hang or raise
+
+
+# ── _on_receive error handling ────────────────────────────────────────────────
+
+def test_on_receive_handles_malformed_packet(gateway):
+    gateway._on_receive({}, gateway.interface)   # no 'decoded' key — must not raise
+
+
+# ── failed ack stops remaining chunks ────────────────────────────────────────
 
 def test_failed_ack_stops_remaining_chunks(store):
     """If ACK times out, no further chunks should be sent."""
