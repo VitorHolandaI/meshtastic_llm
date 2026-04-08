@@ -16,6 +16,7 @@ import meshtastic
 import meshtastic.serial_interface
 import meshtastic.tcp_interface
 
+from chat_mesh.db.store     import SessionStore
 from chat_mesh.llm.pipeline import load_pipeline
 from chat_mesh.mesh.gateway import MeshLLMGateway
 from chat_mesh.mesh.radio   import find_models, choose
@@ -95,6 +96,13 @@ def parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
              "[env: MESH_REPLY_MODE]",
     )
     parser.add_argument(
+        "--db",
+        default=os.getenv("MESH_DB_PATH", "db/sessions.db"),
+        metavar="PATH",
+        help="Path to the SQLite database file for session persistence. "
+             "[env: MESH_DB_PATH] (default: db/sessions.db)",
+    )
+    parser.add_argument(
         "--channel-psk",
         default=os.getenv("MESH_CHANNEL_PSK", "AQ=="),
         metavar="BASE64",
@@ -152,10 +160,12 @@ def main():
     print(f"Connected! Gateway node ID: {my_id}")
     print(f"Reply mode   : {args.reply_mode}")
     print(f"Channel PSK  : {args.channel_psk}  (must match device — set via meshtastic CLI or app)")
+    print(f"Database     : {args.db}")
     print("\nReady. Send any text message to this node to chat with the LLM.")
     print("Send '!reset' to clear your conversation history.\n")
 
-    gateway = MeshLLMGateway(iface, pipe, prompt_token_limit, reply_mode=args.reply_mode)
+    store   = SessionStore(db_path=args.db)
+    gateway = MeshLLMGateway(iface, pipe, prompt_token_limit, reply_mode=args.reply_mode, store=store)
 
     try:
         while True:

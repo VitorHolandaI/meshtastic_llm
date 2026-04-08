@@ -3,7 +3,7 @@ MeshLLMGateway — bridges incoming Meshtastic messages with the LLM pipeline.
 
 Responsibilities:
 - Subscribe to incoming text packets via pubsub
-- Manage per-node conversation sessions (history + rolling summary)
+- Manage per-(node, channel) conversation sessions with SQLite persistence
 - Queue messages and process them sequentially in a background thread
 - Send replies back via DM (ACK-confirmed) or broadcast
 """
@@ -20,19 +20,29 @@ from chat_mesh.config import (
     ACK_TIMEOUT,
     CHARS_PER_TOKEN,
 )
+from chat_mesh.db.store import SessionStore
 from chat_mesh.llm.prompt import build_prompt, compress_history, collect_streamer, strip_think
 from chat_mesh.mesh.radio import chunk_text
 
 
 class MeshLLMGateway:
-    def __init__(self, interface, pipe, prompt_token_limit: int, reply_mode: str = "dm"):
+    def __init__(
+        self,
+        interface,
+        pipe,
+        prompt_token_limit: int,
+        reply_mode: str = "dm",
+        store: SessionStore | None = None,
+    ):
         self.interface          = interface
         self.pipe               = pipe
         self.prompt_token_limit = prompt_token_limit
-        self.reply_mode         = reply_mode  # "dm" | "broadcast"
+        self.reply_mode         = reply_mode
+        self.store              = store or SessionStore()
 
-        # per-node state: {node_id: {"history": [...], "summary": ""}}
-        self.sessions: dict = {}
+        # in-memory cache: {(node_id, channel): {"history": [...], "summary": ""}}
+        # loaded lazily from DB on first message from each (node, channel) pair
+        self._sessions: dict = {}
         self.lock = threading.Lock()
 
         # ACK tracking: {packet_id: {"event": Event, "ok": bool}}
@@ -47,6 +57,22 @@ class MeshLLMGateway:
         pub.subscribe(self._on_ack,     "meshtastic.receive.routing")
         print("[Gateway] Listening for Meshtastic text messages…")
 
+    # ── session helpers ───────────────────────────────────────────────────────
+
+    def _get_session(self, node_id: str, channel: int) -> dict:
+        """Return the in-memory session, loading from DB if not yet cached."""
+        key = (node_id, channel)
+        with self.lock:
+            if key not in self._sessions:
+                self._sessions[key] = self.store.load_session(node_id, channel)
+            return self._sessions[key]
+
+    def _drop_session(self, node_id: str, channel: int):
+        key = (node_id, channel)
+        with self.lock:
+            self._sessions.pop(key, None)
+        self.store.delete_session(node_id, channel)
+
     # ── incoming message callback (Meshtastic thread) ─────────────────────────
 
     def _on_receive(self, packet, interface):
@@ -60,8 +86,7 @@ class MeshLLMGateway:
                 return
 
             if text.lower() in ("!reset", "/reset"):
-                with self.lock:
-                    self.sessions.pop(from_id, None)
+                self._drop_session(from_id, channel)
                 if self.reply_mode == "broadcast":
                     self.interface.sendText(f"[{from_id}] History cleared.", channelIndex=0)
                 else:
@@ -69,7 +94,7 @@ class MeshLLMGateway:
                     print(f"[ACK] reset → {from_id}: {'✓' if ok else '✗ not received'}")
                 return
 
-            print(f"[RX] {from_id}: {text}")
+            print(f"[RX] {from_id} ch{channel}: {text}")
             self.work_queue.put((from_id, channel, text))
 
         except Exception as e:
@@ -94,12 +119,12 @@ class MeshLLMGateway:
 
     # ── send a DM with ACK confirmation ──────────────────────────────────────
 
-    def _send_dm(self, text: str, from_id: str, channel: int) -> bool:
+    def _send_dm(self, text: str, node_id: str, channel: int) -> bool:
         """Send a direct message with wantAck=True. Returns True if acknowledged."""
-        packet    = self.interface.sendText(text, destinationId=from_id, channelIndex=channel, wantAck=True)
+        packet    = self.interface.sendText(text, destinationId=node_id, channelIndex=channel, wantAck=True)
         packet_id = getattr(packet, "id", None)
         if not packet_id:
-            return True  # can't track — assume sent
+            return True
 
         event = threading.Event()
         with self.lock:
@@ -128,10 +153,9 @@ class MeshLLMGateway:
                 self.work_queue.task_done()
 
     def _handle(self, from_id: str, channel: int, user_text: str):
-        with self.lock:
-            session = self.sessions.setdefault(from_id, {"history": [], "summary": ""})
-            history = session["history"]
-            summary = session["summary"]
+        session = self._get_session(from_id, channel)
+        history = list(session["history"])
+        summary = session["summary"]
 
         # compress history if approaching the token limit
         prompt = build_prompt(history, summary, user_text)
@@ -139,12 +163,14 @@ class MeshLLMGateway:
             print(f"[{from_id}] Compressing history…")
             summary, history = compress_history(self.pipe, history, summary)
             with self.lock:
-                self.sessions[from_id]["summary"] = summary
-                self.sessions[from_id]["history"] = history
+                session = self._sessions[(from_id, channel)]
+                session["history"] = history
+                session["summary"] = summary
+            self.store.replace_history(from_id, channel, history, summary)
             prompt = build_prompt(history, summary, user_text)
 
         # generate — full response collected before anything is sent
-        print(f"[{from_id}] Generating…")
+        print(f"[{from_id}] ch{channel} generating…")
         tokens: list[str] = []
         try:
             self.pipe.generate(prompt, streamer=collect_streamer(tokens))
@@ -154,8 +180,10 @@ class MeshLLMGateway:
                 print(f"[{from_id}] Token limit hit, compressing and retrying…")
                 summary, history = compress_history(self.pipe, history, summary)
                 with self.lock:
-                    self.sessions[from_id]["summary"] = summary
-                    self.sessions[from_id]["history"] = history
+                    session = self._sessions[(from_id, channel)]
+                    session["history"] = history
+                    session["summary"] = summary
+                self.store.replace_history(from_id, channel, history, summary)
                 prompt = build_prompt(history, summary, user_text)
                 tokens = []
                 self.pipe.generate(prompt, streamer=collect_streamer(tokens))
@@ -166,9 +194,11 @@ class MeshLLMGateway:
         if "Assistant:" in reply:
             reply = reply.split("Assistant:")[-1].strip()
 
+        # persist to memory cache and DB
+        new_turns = [("user", user_text), ("assistant", reply)]
         with self.lock:
-            self.sessions[from_id]["history"].append(("user", user_text))
-            self.sessions[from_id]["history"].append(("assistant", reply))
+            self._sessions[(from_id, channel)]["history"].extend(new_turns)
+        self.store.append_messages(from_id, channel, new_turns)
 
         self._transmit(reply, from_id, channel)
 

@@ -1,6 +1,11 @@
 # Environment secrets
 .env
 
+# Database
+db/*.db
+db/*.db-wal
+db/*.db-shm
+
 # Python
 __pycache__/
 *.py[cod]

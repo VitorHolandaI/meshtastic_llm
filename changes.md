@@ -201,6 +201,17 @@ Use `int4` quantization for radio use — smaller and faster with minimal qualit
 - Full `--help` output with usage examples, radio commands, encryption notes, and env var reference
 - All arguments have descriptive help text including their `[env: VAR]` fallback
 
+### SQLite session persistence (`chat_mesh/db/`)
+- Added `chat_mesh/db/store.py` with `SessionStore` class backed by SQLite
+- Sessions now persist across gateway restarts — no more lost history on reboot
+- Session key changed from `from_id` → `(from_id, channel)`: same node on different channels gets independent conversations
+- In-memory cache kept for performance; DB is the source of truth on startup
+- `append_messages()` — saves new turns after each exchange
+- `replace_history()` — atomically replaces messages + summary after compression
+- `delete_session()` — wipes session on `!reset`
+- DB path configurable via `--db` CLI arg or `MESH_DB_PATH` env var, defaults to `db/sessions.db`
+- `db/` directory tracked in git via `.gitkeep`; actual `.db` files are gitignored
+
 ### Refactoring — feature-based package layout
 - Split monolithic `mesh_llm_gateway.py` into a proper Python package under `chat_mesh/`
 - `llm/` and `mesh/` are independent sub-packages — either can be extended without touching the other
