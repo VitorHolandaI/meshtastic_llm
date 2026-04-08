@@ -1,0 +1,15 @@
+[run]
+source = chat_mesh
+omit =
+    chat_mesh/__init__.py
+    chat_mesh/llm/__init__.py
+    chat_mesh/mesh/__init__.py
+    chat_mesh/db/__init__.py
+
+[report]
+show_missing = true
+skip_empty   = true
+
+[html]
+directory = htmlcov
+title     = chat_mesh coverage

@@ -6,6 +6,10 @@ db/*.db
 db/*.db-wal
 db/*.db-shm
 
+# Coverage
+.coverage
+htmlcov/
+
 # Python
 __pycache__/
 *.py[cod]
